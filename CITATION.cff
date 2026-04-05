@@ -1,0 +1,35 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+type: software
+title: "Stepwise Regression Analysis for Spectral Data"
+version: 1.0.0
+date-released: 2025-01-15
+authors:
+  - family-names: "Hussein"
+    given-names: "Abdulrahman"
+    orcid: "https://orcid.org/0009-0003-0401-9219"
+    affiliation: "Kent State University, Department of Geography"
+    email: "ahusse12@kent.edu"
+repository-code: "https://github.com/coodawy/stepwise-regression-analysis"
+url: "https://www.climtawy.com"
+abstract: >
+  A Python-based bidirectional stepwise regression framework for spectral 
+  analysis with Variance Inflation Factor (VIF) control. This tool enables 
+  researchers to perform rigorous stepwise regression analysis on spectral 
+  data using open-source Python, eliminating dependency on proprietary 
+  statistical software. The framework implements bidirectional variable 
+  selection with VIF control, generating publication-ready statistical 
+  tables including Model Summary, ANOVA, and Coefficients tables with 
+  incremental model building. Designed for hyperspectral remote sensing 
+  applications and validated against traditional statistical software outputs.
+keywords:
+  - "stepwise regression"
+  - "spectral analysis"
+  - "variance inflation factor"
+  - "multicollinearity"
+  - "hyperspectral"
+  - "remote sensing"
+  - "VPCA"
+  - "statistical modeling"
+  - "Python"
+license: MIT
