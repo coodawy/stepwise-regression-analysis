@@ -183,7 +183,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 🙏 Acknowledgments
 
-This research was conducted at the **Department of Geography, Kent State University** under the supervision of **Dr. Joseph D. Ortiz**.
+This research was conducted at the **Department of Earth Sciences, Kent State University** under the supervision of **Dr. Joseph D. Ortiz**.
 
 Special thanks to the open-source community for the foundational libraries: pandas, numpy, statsmodels, and scipy.
 

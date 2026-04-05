@@ -160,7 +160,7 @@ Enables researchers to perform rigorous stepwise regression analysis on spectral
 
 ## 👨‍🔬 Author
 **Abdulrahman Hussein**  
-PhD Student, Department of Geography  
+PhD Student, Department of Earth Sciences  
 Kent State University  
 Supervisor: Dr. Joseph D. Ortiz
 
