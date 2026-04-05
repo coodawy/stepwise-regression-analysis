@@ -5,7 +5,7 @@ Stepwise Regression Analysis for Spectral Data
 Version: 1.0.0
 Author: Abdulrahman Hussein
 Affiliation: Kent State University, Department of Geography
-Supervisor: Dr. Scott Sheridan
+Supervisor: Dr. Joseph D. Ortiz
 Website: www.climtawy.com
 ORCID: 0009-0003-0401-9219
 Email: ahusse12@kent.edu

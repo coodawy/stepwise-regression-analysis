@@ -161,7 +161,8 @@ Enables researchers to perform rigorous stepwise regression analysis on spectral
 ## 👨‍🔬 Author
 **Abdulrahman Hussein**  
 PhD Student, Department of Geography  
-Kent State University
+Kent State University  
+Supervisor: Dr. Joseph D. Ortiz
 
 **ORCID**: [0009-0003-0401-9219](https://orcid.org/0009-0003-0401-9219)  
 **Website**: [www.climtawy.com](https://www.climtawy.com)

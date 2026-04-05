@@ -38,32 +38,31 @@ pip install -r requirements.txt
 
 ```python
 import pandas as pd
-from stepwise import stepwise_bidirectional, build_regression_tables
+from framework.stepwise_vif import stepwise_bidirectional
+from framework.preprocessing import zscore_dataframe
 
 # Load your data
 loadings = pd.read_csv('vpca_loadings.csv', index_col='Wavelength')
 library = pd.read_csv('spectral_library.csv', index_col='Wavelength')
 
+# Standardize data
+z_loadings = zscore_dataframe(loadings)
+z_library = zscore_dataframe(library)
+
 # Run stepwise regression
 selected_vars, history = stepwise_bidirectional(
-    y=loadings['VPC1'],
-    X=library,
+    y=z_loadings['VPC1'],
+    X=z_library,
     p_enter=0.05,
     p_remove=0.10,
-    vif_threshold=2.0
+    vif_threshold=2.0,
+    verbose=True
 )
 
-# Generate statistical tables
-summary_df, anova_df, coef_df = build_regression_tables(
-    vpc_name='VPC1',
-    y=loadings['VPC1'],
-    X=library,
-    selected=selected_vars,
-    history=history
-)
+print(f"Selected variables: {selected_vars}")
 ```
 
-See `examples/` for complete workflows.
+See `learning/notebooks/` for complete workflows and examples.
 
 ## 📊 Methodology
 
@@ -104,24 +103,26 @@ stepwise-regression-analysis/
 ├── CHANGELOG.md                        # Version history
 ├── requirements.txt                    # Python dependencies
 │
-├── src/                                # Source code
-│   ├── stepwise_vif.py                # Core stepwise algorithm
-│   ├── preprocessing.py               # Data preprocessing utilities
-│   ├── vif_utils.py                   # VIF calculation functions
-│   └── vpca_integration.py            # VPCA data loading
+├── framework/                          # Core Python framework
+│   ├── stepwise_vif.py                # Bidirectional stepwise algorithm
+│   ├── preprocessing.py               # Z-score standardization
+│   ├── vif_utils.py                   # VIF calculations
+│   ├── vpca_integration.py            # VPCA data loading
+│   ├── sample_library.py              # Spectral library management
+│   ├── plots.py                       # Visualization utilities
+│   └── __init__.py                    # Package initialization
 │
-├── examples/                           # Example notebooks
-│   ├── Stepwise-learning-Code Writing-v2.ipynb
-│   └── complete_tutorial.ipynb
+├── learning/                           # Development & testing materials
+│   ├── notebooks/                     # Learning notebooks
+│   │   ├── Stepwise-learning-Code Writing-v2.ipynb
+│   │   └── complete_tutorial.ipynb
+│   ├── test-data/                     # Sample datasets
+│   │   ├── test_loadings.csv
+│   │   └── test_library.csv
+│   └── spss-files/                    # SPSS validation files
 │
-├── docs/                               # Documentation
-│   ├── METHODOLOGY.md                 # Detailed methodology
-│   ├── USAGE_GUIDE.md                 # User guide
-│   └── SPSS_Testing_Guide.md          # Validation guide
-│
-└── tests/                              # Test data
-    ├── test_loadings.csv
-    └── test_library.csv
+└── docs/                               # Documentation
+    └── SPSS_Testing_Guide.md          # Validation guide
 ```
 
 ## 📚 Citation
@@ -182,9 +183,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 🙏 Acknowledgments
 
-This research was conducted at the **Department of Geography, Kent State University** under the supervision of **Dr. Scott Sheridan**.
-
-**Funding**: This work was supported by Kent State University Graduate Student Senate Research Grant.
+This research was conducted at the **Department of Geography, Kent State University** under the supervision of **Dr. Joseph D. Ortiz**.
 
 Special thanks to the open-source community for the foundational libraries: pandas, numpy, statsmodels, and scipy.
 
