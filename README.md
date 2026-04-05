@@ -27,7 +27,7 @@ Developed for hyperspectral remote sensing applications, this tool has been vali
 
 ```bash
 # Clone the repository
-git clone https://github.com/coodawy/stepwise-regression-analysis.git
+git clone https://github.com/abdulrahman-R-A-hussein/stepwise-regression-analysis.git
 cd stepwise-regression-analysis
 
 # Install dependencies

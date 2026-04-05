@@ -101,11 +101,13 @@ git commit -m "feat: initial release of stepwise regression analysis framework
 5. Do NOT initialize with README (we already have one)
 6. Click "Create repository"
 
+**Note**: Make sure you're logged in as `abdulrahman-R-A-hussein`
+
 ### 6. Push to GitHub
 
 ```bash
 # Add remote
-git remote add origin https://github.com/coodawy/stepwise-regression-analysis.git
+git remote add origin https://github.com/abdulrahman-R-A-hussein/stepwise-regression-analysis.git
 
 # Push to main branch
 git branch -M main

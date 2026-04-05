@@ -10,7 +10,7 @@ authors:
     orcid: "https://orcid.org/0009-0003-0401-9219"
     affiliation: "Kent State University, Department of Earth Sciences"
     email: "ahusse12@kent.edu"
-repository-code: "https://github.com/coodawy/stepwise-regression-analysis"
+repository-code: "https://github.com/abdulrahman-R-A-hussein/stepwise-regression-analysis"
 url: "https://www.climtawy.com"
 abstract: >
   A Python-based bidirectional stepwise regression framework for spectral 
