@@ -2,8 +2,8 @@ cff-version: 1.2.0
 message: "If you use this software, please cite it as below."
 type: software
 title: "Stepwise Regression Analysis for Spectral Data"
-version: 1.0.0
-date-released: 2025-01-15
+version: 1.2.0
+date-released: 2026-04-27
 authors:
   - family-names: "Hussein"
     given-names: "Abdulrahman"
