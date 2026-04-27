@@ -1,78 +1,66 @@
 """
-Stepwise Regression with VIF Module
+Stepwise Regression Analysis Framework
 
-Author: Abdulrahman Hussein
-Supervisor: Dr. Joseph D. Ortiz
+A bidirectional stepwise regression framework with joint p-value and VIF
+stopping criteria, designed for VPCA loadings vs. spectral library analysis.
+
+Author:      Abdulrahman Hussein
+Supervisor:  Dr. Joseph D. Ortiz
 Institution: Kent State University, Department of Earth Sciences
+License:     MIT
 
-A comprehensive stepwise regression implementation with joint P-value 
-and VIF (Variance Inflation Factor) stopping criterion.
+Quick start
+-----------
+    from framework import VPCAStepwiseAnalysis
 
-Key Features:
-- Joint stopping criterion: p-value AND VIF thresholds
-- Default VIF threshold of 2.0 (optimal for principal components)
-- R² change tracking for overfitting detection
-- Z-score standardization for component loadings
-
-Usage:
-    from stepwise import StepwiseVIFRegression, standardize_to_zscore
-    
-    # Standardize VPCA loadings before regression
-    z_loadings = standardize_to_zscore(loadings, axis=1)
-    
-    # Run stepwise regression (default VIF=2.0)
-    model = StepwiseVIFRegression(method='bidirectional')
-    model.fit(X, y)
-    print(model.summary())
+    analyzer = VPCAStepwiseAnalysis(p_enter=0.05, p_remove=0.10, vif_threshold=2.0)
+    analyzer.load_data("loadings.csv", "library.csv")
+    summary, detailed = analyzer.run_analysis()
+    analyzer.export_results("output/")
 """
 
+from .vif_utils import (
+    calculate_vif,
+    fit_ols,
+    get_model_metrics,
+    check_vif_threshold,
+    get_highest_vif_variable,
+)
 from .stepwise_vif import StepwiseVIFRegression, IterationLog
-from .vif_utils import calculate_vif, calculate_vif_manual, check_vif_threshold
-from .plots import (plot_selection_history, plot_vif, plot_coefficients, 
-                    plot_actual_vs_predicted)
-from .preprocessing import (standardize_to_zscore, standardize_loadings_for_regression,
-                            prepare_spectral_library, validate_band_alignment,
-                            merge_loadings_with_library)
-from .vpca_integration import (load_vpca_loadings, load_spectral_library,
-                               align_to_sentinel2_bands, run_stepwise_identification,
-                               create_identification_summary, print_identification_report,
-                               VPCAResults, StepwiseResult)
-from .sample_library import (create_sample_spectral_library, create_sample_vpca_loadings,
-                             save_sample_data)
+from .regression_tables import build_regression_tables
+from .vpca_integration import VPCAStepwiseAnalysis, run_vpca_stepwise
+from .plots import (
+    plot_iteration_history,
+    plot_vif,
+    plot_coefficients,
+    plot_component,
+    plot_all_components,
+    plot_actual_vs_predicted,
+)
 
 __all__ = [
-    # Core regression
-    'StepwiseVIFRegression',
-    'IterationLog',
+    # Core class
+    "StepwiseVIFRegression",
+    "IterationLog",
+    # VPCA workflow
+    "VPCAStepwiseAnalysis",
+    "run_vpca_stepwise",
+    # SPSS tables
+    "build_regression_tables",
     # VIF utilities
-    'calculate_vif',
-    'calculate_vif_manual', 
-    'check_vif_threshold',
-    # Preprocessing
-    'standardize_to_zscore',
-    'standardize_loadings_for_regression',
-    'prepare_spectral_library',
-    'validate_band_alignment',
-    'merge_loadings_with_library',
-    # VPCA Integration
-    'load_vpca_loadings',
-    'load_spectral_library',
-    'align_to_sentinel2_bands',
-    'run_stepwise_identification',
-    'create_identification_summary',
-    'print_identification_report',
-    'VPCAResults',
-    'StepwiseResult',
-    # Sample data for testing
-    'create_sample_spectral_library',
-    'create_sample_vpca_loadings',
-    'save_sample_data',
+    "calculate_vif",
+    "fit_ols",
+    "get_model_metrics",
+    "check_vif_threshold",
+    "get_highest_vif_variable",
     # Plotting
-    'plot_selection_history',
-    'plot_vif',
-    'plot_coefficients',
-    'plot_actual_vs_predicted'
+    "plot_iteration_history",
+    "plot_vif",
+    "plot_coefficients",
+    "plot_component",
+    "plot_all_components",
+    "plot_actual_vs_predicted",
 ]
 
-__version__ = '1.1.0'
-__author__ = 'Abdulrahman Hussein'
+__version__ = "1.2.0"
+__author__ = "Abdulrahman Hussein"

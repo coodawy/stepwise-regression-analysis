@@ -84,3 +84,7 @@ desktop.ini
 .coverage
 htmlcov/
 .tox/
+
+# Internal scratch / build helpers
+_*.py
+_inspect.py

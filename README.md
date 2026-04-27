@@ -34,35 +34,34 @@ cd stepwise-regression-analysis
 pip install -r requirements.txt
 ```
 
-### Basic Usage
+### Three ways to use it
 
-```python
-import pandas as pd
-from framework.stepwise_vif import stepwise_bidirectional
-from framework.preprocessing import zscore_dataframe
+#### 1. Desktop app (Streamlit) - easiest
 
-# Load your data
-loadings = pd.read_csv('vpca_loadings.csv', index_col='Wavelength')
-library = pd.read_csv('spectral_library.csv', index_col='Wavelength')
-
-# Standardize data
-z_loadings = zscore_dataframe(loadings)
-z_library = zscore_dataframe(library)
-
-# Run stepwise regression
-selected_vars, history = stepwise_bidirectional(
-    y=z_loadings['VPC1'],
-    X=z_library,
-    p_enter=0.05,
-    p_remove=0.10,
-    vif_threshold=2.0,
-    verbose=True
-)
-
-print(f"Selected variables: {selected_vars}")
+```bash
+streamlit run app.py
 ```
 
-See `learning/notebooks/` for complete workflows and examples.
+A local web UI opens in your browser with drag-and-drop CSV upload, sliders for `p_enter` / `p_remove` / `vif_threshold`, interactive results tabs (Summary, VIF, Iteration History, Plots), and one-click Excel/CSV download.
+
+#### 2. Notebook (slim orchestrator)
+
+Open `framework/StepwiseRegressionVIF.ipynb` and run the 5 cells top-to-bottom. All heavy logic is imported from the `framework/` package; the notebook itself is just configuration + 4 calls.
+
+#### 3. Python API
+
+```python
+from framework import VPCAStepwiseAnalysis
+
+analyzer = VPCAStepwiseAnalysis(
+    p_enter=0.05, p_remove=0.10, vif_threshold=2.0, verbose=1,
+)
+analyzer.load_data("loadings.csv", "library.csv")
+summary, detailed = analyzer.run_analysis()
+analyzer.export_results("output/")
+```
+
+See `learning/notebooks/` for tutorial materials and `framework/StepwiseRegressionVIF.ipynb` for the canonical workflow.
 
 ## 📊 Methodology
 
@@ -103,14 +102,18 @@ stepwise-regression-analysis/
 ├── CHANGELOG.md                        # Version history
 ├── requirements.txt                    # Python dependencies
 │
+├── app.py                              # Streamlit desktop app
+│
 ├── framework/                          # Core Python framework
-│   ├── stepwise_vif.py                # Bidirectional stepwise algorithm
+│   ├── stepwise_vif.py                # StepwiseVIFRegression class (bidirectional)
+│   ├── regression_tables.py           # SPSS-style Model Summary / ANOVA / Coefficients
+│   ├── vpca_integration.py            # VPCAStepwiseAnalysis (high-level wrapper)
 │   ├── preprocessing.py               # Z-score standardization
 │   ├── vif_utils.py                   # VIF calculations
-│   ├── vpca_integration.py            # VPCA data loading
-│   ├── sample_library.py              # Spectral library management
-│   ├── plots.py                       # Visualization utilities
-│   └── __init__.py                    # Package initialization
+│   ├── sample_library.py              # Synthetic spectra (testing only)
+│   ├── plots.py                       # Matplotlib visualization helpers
+│   ├── StepwiseRegressionVIF.ipynb    # Slim 5-step orchestrator notebook
+│   └── __init__.py                    # Package exports
 │
 ├── learning/                           # Development & testing materials
 │   ├── notebooks/                     # Learning notebooks
@@ -130,18 +133,18 @@ stepwise-regression-analysis/
 If you use this software in your research, please cite it as:
 
 ```bibtex
-@software{Hussein_Stepwise_Regression_2025,
+@software{Hussein_Stepwise_Regression_2026,
   author = {Hussein, Abdulrahman},
   title = {Stepwise Regression Analysis for Spectral Data},
-  year = {2025},
-  url = {https://github.com/coodawy/stepwise-regression-analysis},
-  version = {1.0.0}
+  year = {2026},
+  url = {https://github.com/abdulrahman-R-A-hussein/stepwise-regression-analysis},
+  version = {1.2.0}
 }
 ```
 
 ## 🔬 Development Status
 
-**Current Version**: 1.0.0 (Initial Release)
+**Current Version**: 1.2.0 - rewritten notebook, bidirectional-only, Streamlit desktop app
 
 **Roadmap**:
 - [ ] Add support for weighted regression
@@ -149,6 +152,7 @@ If you use this software in your research, please cite it as:
 - [ ] Add visualization tools for model diagnostics
 - [ ] Support for categorical predictors
 - [ ] Integration with scikit-learn pipelines
+- [ ] Package the desktop app as a standalone `.exe` (PyInstaller)
 
 ## 🤝 Contributing
 
@@ -164,7 +168,7 @@ Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for gui
 ## 📧 Contact
 
 **Abdulrahman Hussein**  
-PhD Student, Department of Geography  
+PhD Student, Department of Earth Sciences  
 Kent State University  
 
 **ORCID**: [0009-0003-0401-9219](https://orcid.org/0009-0003-0401-9219)  

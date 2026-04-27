@@ -1,453 +1,389 @@
 """
-VPCA to Stepwise Regression Integration Module
+VPCAStepwiseAnalysis: end-to-end VPCA + spectral-library stepwise workflow.
 
-Author: Abdulrahman Hussein
-Supervisor: Dr. Joseph D. Ortiz
+Author:      Abdulrahman Hussein
+Supervisor:  Dr. Joseph D. Ortiz
 Institution: Kent State University, Department of Earth Sciences
 
-This module provides functions to connect VPCA outputs to stepwise regression inputs,
-automating the workflow that was previously done manually in Excel/SPSS.
-
 Workflow:
-1. Load VPCA loadings (from vpca_loadings.csv)
-2. Convert loadings to z-scores (remove amplitude weighting)
-3. Load/prepare spectral library (reference spectra for materials)
-4. Run stepwise regression for each VPC component
-5. Identify materials contributing to each component
+    1. Load VPCA loadings + spectral library, auto-detect wavelength columns,
+       align wavelengths.
+    2. Treat data as already z-scored (matches the v3 working flow).
+    3. Run StepwiseVIFRegression for every VPC component.
+    4. Produce a multi-sheet Excel report with SPSS-style incremental tables.
 """
+
+from __future__ import annotations
+
+import os
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 import pandas as pd
-from pathlib import Path
-from typing import Dict, List, Optional, Union
-from dataclasses import dataclass
 
-from .preprocessing import standardize_to_zscore
 from .stepwise_vif import StepwiseVIFRegression
+from .regression_tables import build_regression_tables
 
 
-# Sentinel-2 band wavelengths (nm) - center wavelengths
-SENTINEL2_WAVELENGTHS = {
-    'B1': 443.9,   # Coastal aerosol
-    'B2': 496.6,   # Blue
-    'B3': 560.0,   # Green
-    'B4': 664.5,   # Red
-    'B5': 703.9,   # Red Edge 1
-    'B6': 740.2,   # Red Edge 2
-    'B7': 782.5,   # Red Edge 3
-    'B8': 835.1,   # NIR
-    'B8A': 864.8,  # NIR Narrow
-}
+class VPCAStepwiseAnalysis:
+    """End-to-end VPCA + spectral-library stepwise analysis."""
 
-# Default band order for VPCA
-DEFAULT_BAND_ORDER = ['B1', 'B2', 'B3', 'B4', 'B5', 'B6', 'B7', 'B8', 'B8A']
+    def __init__(self, p_enter: float = 0.05, p_remove: float = 0.10,
+                 vif_threshold: float = 2.0, max_iter: int = 100, verbose: int = 1):
+        self.p_enter = p_enter
+        self.p_remove = p_remove
+        self.vif_threshold = vif_threshold
+        self.max_iter = max_iter
+        self.verbose = verbose
 
+        self.z_loadings_: Optional[pd.DataFrame] = None
+        self.z_library_: Optional[pd.DataFrame] = None
+        self.summary_results_: Optional[pd.DataFrame] = None
+        self.detailed_results_: Optional[pd.DataFrame] = None
+        self.descriptive_stats_: Optional[pd.DataFrame] = None
+        self.models_: Dict[str, StepwiseVIFRegression] = {}
+        self.regression_tables_: Dict[str, Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]] = {}
 
-@dataclass
-class VPCAResults:
-    """Container for VPCA analysis results."""
-    loadings: pd.DataFrame       # (bands × components) - raw loadings
-    z_loadings: pd.DataFrame     # (bands × components) - z-scored loadings
-    eigenvalues: Optional[pd.Series] = None
-    variance_explained: Optional[pd.Series] = None
-    communalities: Optional[pd.DataFrame] = None
-    band_names: List[str] = None
-    component_names: List[str] = None
-    
-    def __post_init__(self):
-        if self.band_names is None:
-            self.band_names = self.loadings.index.tolist()
-        if self.component_names is None:
-            self.component_names = self.loadings.columns.tolist()
+    # --- data loading ---
+    def load_data(self, loadings_file: str, library_file: str
+                  ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Load and align VPCA loadings + spectral library (assumed pre-z-scored)."""
 
+        # Loadings
+        loadings = pd.read_csv(loadings_file)
+        wav_col = next(
+            (c for c in loadings.columns
+             if "centre_nm" in c or "wavelength" in c.lower()),
+            loadings.columns[0],
+        )
+        loadings = loadings.set_index(wav_col)
+        loadings = loadings.drop(
+            ["Eigenvalues", "Frac Var", "Extracted Frac Var"], errors="ignore"
+        )
+        loadings = loadings[[c for c in loadings.columns if c.startswith("VPC")]]
+        loadings = loadings.apply(pd.to_numeric, errors="coerce")
+        loadings.index = pd.to_numeric(loadings.index, errors="coerce")
+        loadings = loadings[loadings.index.notna()]
 
-@dataclass 
-class StepwiseResult:
-    """Container for stepwise regression result for one VPC."""
-    component: str
-    model: StepwiseVIFRegression
-    selected_materials: List[str]
-    r2: float
-    adj_r2: float
-    coefficients: pd.DataFrame
-    vif_values: pd.DataFrame
-
-
-def load_vpca_loadings(loadings_path: Union[str, Path],
-                       eigenvalues_path: Optional[Union[str, Path]] = None,
-                       variance_path: Optional[Union[str, Path]] = None,
-                       band_col: str = 'band') -> VPCAResults:
-    """
-    Load VPCA loadings from CSV file and prepare for stepwise regression.
-    
-    Parameters
-    ----------
-    loadings_path : str or Path
-        Path to VPCA loadings CSV file. Expected format:
-        - Rows: spectral bands (B1, B2, ..., B8A)
-        - Columns: VPC1, VPC2, ..., VPC6
-    eigenvalues_path : str or Path, optional
-        Path to eigenvalues CSV
-    variance_path : str or Path, optional
-        Path to variance explained CSV
-    band_col : str
-        Name of column containing band names (or use index)
-    
-    Returns
-    -------
-    VPCAResults
-        Container with raw and z-scored loadings
-    
-    Example
-    -------
-    >>> results = load_vpca_loadings('vpca_results/vpca_loadings.csv')
-    >>> print(results.z_loadings)  # Ready for stepwise regression
-    """
-    # Load loadings
-    loadings_df = pd.read_csv(loadings_path)
-    
-    # Handle band names - could be in first column or index
-    if band_col in loadings_df.columns:
-        loadings_df = loadings_df.set_index(band_col)
-    elif loadings_df.columns[0] in ['band', 'Band', 'wavelength', 'Wavelength', 'Wavelengths']:
-        loadings_df = loadings_df.set_index(loadings_df.columns[0])
-    
-    # Filter out metadata rows (Eigenvalues, Frac Var, Extracted Frac Var)
-    # These rows have non-numeric index values
-    if loadings_df.index.dtype == object:
-        numeric_mask = pd.to_numeric(loadings_df.index, errors='coerce').notna()
-        loadings_df = loadings_df[numeric_mask]
-        loadings_df.index = pd.to_numeric(loadings_df.index)
-    
-    # Identify component columns (VPC1, VPC2, etc. or PC1, PC2, etc.)
-    component_cols = [c for c in loadings_df.columns 
-                      if c.upper().startswith(('VPC', 'PC', 'COMP'))]
-    if not component_cols:
-        # Try columns starting with 'component' (legacy VPCA output)
-        component_cols = [c for c in loadings_df.columns
-                          if c.lower().startswith('component')]
-    if not component_cols:
-        # Assume all numeric columns except Comm_* are components
-        component_cols = [c for c in loadings_df.select_dtypes(include=[np.number]).columns
-                          if not c.startswith('Comm')]
-    
-    loadings = loadings_df[component_cols]
-    
-    # Rename legacy 'component N' format to 'VPCN' for consistency
-    rename_map = {}
-    for col in loadings.columns:
-        if col.lower().startswith('component'):
-            num = col.replace('component', '').replace('Component', '').strip()
-            rename_map[col] = f'VPC{num}'
-    if rename_map:
-        loadings = loadings.rename(columns=rename_map)
-    
-    # Compute z-scores (across bands for each component)
-    z_loadings = standardize_to_zscore(loadings.T, axis=1).T
-    
-    # Load optional files
-    eigenvalues = None
-    variance_explained = None
-    
-    if eigenvalues_path and Path(eigenvalues_path).exists():
-        eigen_df = pd.read_csv(eigenvalues_path)
-        eigenvalues = eigen_df.iloc[:, -1] if len(eigen_df.columns) > 1 else eigen_df.iloc[:, 0]
-    
-    if variance_path and Path(variance_path).exists():
-        var_df = pd.read_csv(variance_path)
-        variance_explained = var_df.iloc[:, -1] if len(var_df.columns) > 1 else var_df.iloc[:, 0]
-    
-    return VPCAResults(
-        loadings=loadings,
-        z_loadings=z_loadings,
-        eigenvalues=eigenvalues,
-        variance_explained=variance_explained
-    )
-
-
-def load_spectral_library(library_path: Union[str, Path],
-                          wavelength_col: str = 'wavelength',
-                          environment: str = 'freshwater') -> pd.DataFrame:
-    """
-    Load spectral library and filter for environment type.
-    
-    Parameters
-    ----------
-    library_path : str or Path
-        Path to spectral library CSV. Expected format:
-        - First column: wavelength or band name
-        - Other columns: reference spectra (water, pigments, minerals)
-    wavelength_col : str
-        Name of wavelength/band column
-    environment : str
-        Environment type for filtering: 'freshwater', 'marine', or 'all'
-    
-    Returns
-    -------
-    pd.DataFrame
-        Spectral library with bands as index, spectra as columns
-    
-    Notes
-    -----
-    For freshwater (Lake Erie), marine-only spectra are excluded:
-    - Sargassum, Halodule, Syringodium, Thalassia (seagrasses)
-    - Karenia brevis, K. brevis (red tide)
-    - Aragonite (typically marine carbonate)
-    """
-    library = pd.read_csv(library_path)
-    
-    # Set wavelength/band as index
-    if wavelength_col in library.columns:
-        library = library.set_index(wavelength_col)
-    else:
-        library = library.set_index(library.columns[0])
-    
-    # Filter columns based on environment
-    if environment.lower() == 'freshwater':
-        # Exclude marine-only spectra
-        marine_only = [
-            'sargassum', 'halodule', 'syringodium', 'thalassia',
-            'karenia', 'k_brevis', 'kbrevis', 'k. brevis',
-            'aragonite', 'coral'
+        # Library
+        library = pd.read_csv(library_file)
+        wav_col = next(
+            (c for c in library.columns
+             if "centre_nm" in c or "wavelength" in c.lower()),
+            library.columns[0],
+        )
+        library = library.set_index(wav_col)
+        library.index = pd.to_numeric(library.index, errors="coerce")
+        library = library[library.index.notna()]
+        library = library.apply(pd.to_numeric, errors="coerce")
+        library = library.dropna(axis=1, how="all")
+        library.columns = [
+            c.replace("_Zdrdl", "").replace(" Zdrdl", "").strip()
+            for c in library.columns
         ]
-        cols_to_keep = []
-        for col in library.columns:
-            col_lower = col.lower()
-            if not any(marine in col_lower for marine in marine_only):
-                cols_to_keep.append(col)
-        library = library[cols_to_keep]
-    
-    elif environment.lower() == 'marine':
-        pass  # Keep all spectra for marine
-    
-    # else 'all' - keep everything
-    
-    return library
+        drop_cols = [
+            c for c in library.columns
+            if "VPC" in c or c.startswith("IRL") or c == "Band" or "centre_nm" in c
+        ]
+        library = library.drop(columns=drop_cols, errors="ignore")
 
+        # Align wavelengths
+        loadings.index = pd.Index(np.round(loadings.index.values, 1))
+        library.index = pd.Index(np.round(library.index.values, 1))
+        common = sorted(set(loadings.index) & set(library.index))
+        if not common:
+            raise ValueError("No common wavelengths between loadings and library.")
+        loadings = loadings.loc[common]
+        library = library.loc[common]
 
-def align_to_sentinel2_bands(library: pd.DataFrame,
-                             target_bands: List[str] = None) -> pd.DataFrame:
-    """
-    Resample/align spectral library to Sentinel-2 band wavelengths.
-    
-    Parameters
-    ----------
-    library : pd.DataFrame
-        Spectral library with wavelengths as index (in nm)
-    target_bands : list
-        Target Sentinel-2 bands. Default: B1-B8A
-    
-    Returns
-    -------
-    pd.DataFrame
-        Library resampled to Sentinel-2 bands
-    
-    Notes
-    -----
-    If library has hyperspectral resolution (e.g., 10nm), this function
-    interpolates to the Sentinel-2 band center wavelengths.
-    If library already has Sentinel-2 bands, returns as-is.
-    """
-    if target_bands is None:
-        target_bands = DEFAULT_BAND_ORDER
-    
-    target_wavelengths = [SENTINEL2_WAVELENGTHS[b] for b in target_bands]
-    
-    # Check if library index is numeric (wavelengths) or band names
-    try:
-        lib_wavelengths = library.index.astype(float)
-        is_numeric = True
-    except (ValueError, TypeError):
-        is_numeric = False
-    
-    if is_numeric:
-        # Interpolate to target wavelengths
-        from scipy import interpolate
-        
-        resampled = pd.DataFrame(index=target_bands)
-        for col in library.columns:
-            f = interpolate.interp1d(lib_wavelengths, library[col].values,
-                                     kind='linear', fill_value='extrapolate')
-            resampled[col] = f(target_wavelengths)
-        return resampled
-    else:
-        # Already has band names - filter to target
-        available = [b for b in target_bands if b in library.index]
-        return library.loc[available]
+        # Rename VPC columns -> VPCA_Z1, VPCA_Z2, ...
+        loadings.columns = [f"VPCA_Z{i + 1}" for i in range(loadings.shape[1])]
 
+        self.z_loadings_ = loadings
+        self.z_library_ = library
 
-def run_stepwise_identification(vpca_results: VPCAResults,
-                                spectral_library: pd.DataFrame,
-                                components: List[str] = None,
-                                method: str = 'forward',
-                                p_enter: float = 0.05,
-                                p_remove: float = 0.10,
-                                vif_threshold: float = 2.0,
-                                r2_change_threshold: float = None,
-                                verbose: int = 1) -> Dict[str, StepwiseResult]:
-    """
-    Run stepwise regression to identify materials for each VPC component.
-    
-    This automates the SPSS workflow shown in the meeting:
-    1. Take z-scored VPC loadings (Y variable)
-    2. Regress against spectral library (X variables)
-    3. Use joint p-value + VIF stopping criterion
-    
-    Parameters
-    ----------
-    vpca_results : VPCAResults
-        VPCA results with z-scored loadings
-    spectral_library : pd.DataFrame
-        Reference spectra (bands as rows, materials as columns)
-    components : list, optional
-        Which components to analyze. Default: all VPCs
-    method : str
-        Stepwise method: 'forward', 'backward', or 'bidirectional'
-    p_enter : float
-        P-value threshold for entry (default 0.05)
-    p_remove : float
-        P-value threshold for removal (default 0.10)
-    vif_threshold : float
-        VIF threshold (default 2.0 for principal components)
-    r2_change_threshold : float, optional
-        Minimum R² change to continue adding variables
-    verbose : int
-        Verbosity level
-    
-    Returns
-    -------
-    Dict[str, StepwiseResult]
-        Results for each component
-    
-    Example
-    -------
-    >>> results = run_stepwise_identification(vpca, library)
-    >>> for comp, result in results.items():
-    ...     print(f"{comp}: {result.selected_materials}, R²={result.r2:.3f}")
-    """
-    if components is None:
-        components = vpca_results.component_names
-    
-    # Ensure alignment between loadings and library
-    common_bands = list(set(vpca_results.z_loadings.index) & 
-                        set(spectral_library.index))
-    if len(common_bands) == 0:
-        raise ValueError("No common bands between VPCA loadings and spectral library. "
-                         "Check band names/wavelengths alignment.")
-    
-    z_loadings = vpca_results.z_loadings.loc[common_bands]
-    library = spectral_library.loc[common_bands]
-    
-    # Standardize library spectra
-    library_z = standardize_to_zscore(library.T, axis=1).T
-    
-    results = {}
-    
-    for comp in components:
-        if comp not in z_loadings.columns:
-            print(f"Warning: Component {comp} not found in loadings")
-            continue
-        
-        if verbose >= 1:
-            print(f"\n{'='*60}")
-            print(f"Identifying materials for {comp}")
-            print(f"{'='*60}")
-        
-        # Y = z-scored VPC loadings for this component
-        y = z_loadings[comp]
-        
-        # X = z-scored spectral library
-        X = library_z
-        
-        # Run stepwise regression
-        model = StepwiseVIFRegression(
-            method=method,
-            p_enter=p_enter,
-            p_remove=p_remove,
-            vif_threshold=vif_threshold,
-            r2_change_threshold=r2_change_threshold,
-            verbose=verbose
-        )
-        model.fit(X, y)
-        
-        # Extract results
-        if model.model_ is not None:
-            coef_df = pd.DataFrame({
-                'material': ['const'] + model.selected_features_,
-                'coefficient': model.model_.params.values,
-                'std_error': model.model_.bse.values,
-                'p_value': model.model_.pvalues.values
+        # Descriptive stats (sanity check that data is actually z-scored)
+        all_z = pd.concat([loadings, library], axis=1)
+        rows = []
+        for col in all_z.columns:
+            mean = float(all_z[col].mean())
+            std = float(all_z[col].std(ddof=0))
+            rows.append({
+                "Variable": col,
+                "N": len(all_z),
+                "Mean": round(mean, 6),
+                "Std Dev": round(std, 6),
+                "Z-scored?": "yes" if abs(mean) < 1e-6 and abs(std - 1.0) < 1e-6 else "no",
             })
-            r2 = model.model_.rsquared
-            adj_r2 = model.model_.rsquared_adj
-        else:
-            coef_df = pd.DataFrame()
-            r2 = 0.0
-            adj_r2 = 0.0
-        
-        results[comp] = StepwiseResult(
-            component=comp,
-            model=model,
-            selected_materials=model.selected_features_,
-            r2=r2,
-            adj_r2=adj_r2,
-            coefficients=coef_df,
-            vif_values=model.vif_final_ if model.vif_final_ is not None else pd.DataFrame()
-        )
-    
-    return results
+        self.descriptive_stats_ = pd.DataFrame(rows)
+
+        if self.verbose > 0:
+            print(
+                f"Loaded {loadings.shape[1]} VPC components, "
+                f"{library.shape[1]} library materials, "
+                f"{len(common)} common wavelengths."
+            )
+            n_zscored = (self.descriptive_stats_["Z-scored?"] == "yes").sum()
+            n_total = len(self.descriptive_stats_)
+            print(
+                f"Descriptive stats: {n_zscored}/{n_total} variables look z-scored "
+                f"(mean~0, std~1)."
+            )
+
+        return loadings, library
+
+    # --- analysis ---
+    def run_analysis(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Run stepwise selection for every VPC component and build all tables."""
+        if self.z_loadings_ is None or self.z_library_ is None:
+            raise ValueError("Call load_data(...) first.")
+
+        summary_rows, detailed_rows = [], []
+        self.models_ = {}
+        self.regression_tables_ = {}
+
+        for vpc in self.z_loadings_.columns:
+            if self.verbose > 0:
+                print("\n" + "=" * 70)
+                print(f"Analyzing {vpc}")
+                print("=" * 70)
+
+            sel = StepwiseVIFRegression(
+                p_enter=self.p_enter,
+                p_remove=self.p_remove,
+                vif_threshold=self.vif_threshold,
+                max_iter=self.max_iter,
+                verbose=self.verbose,
+            ).fit(self.z_library_, self.z_loadings_[vpc])
+            self.models_[vpc] = sel
+
+            selected = sel.selected_features_
+            if selected:
+                m = sel.model_
+                r2 = float(m.rsquared)
+                adj = float(m.rsquared_adj)
+                vif_df = sel.get_vif()
+                entry_p = sel.get_entry_pvalues()
+                std_b = sel.get_standardized_coefs()
+
+                for var in selected:
+                    vif_val = (
+                        float(vif_df.loc[vif_df["Variable"] == var, "VIF"].values[0])
+                        if not vif_df.empty else np.nan
+                    )
+                    detailed_rows.append({
+                        "Component": vpc,
+                        "Material": var,
+                        "VIF": round(vif_val, 2),
+                        "R_squared": round(r2, 4),
+                        "Adj_R_squared": round(adj, 4),
+                        "Sig_p": (
+                            round(float(entry_p.get(var, np.nan)), 4)
+                            if var in entry_p.index else np.nan
+                        ),
+                        "Std_Beta": (
+                            round(float(std_b.get(var, np.nan)), 4)
+                            if var in std_b.index else np.nan
+                        ),
+                    })
+
+                vif_details = (
+                    ", ".join(
+                        f"{r['Variable']}({r['VIF']:.2f})"
+                        for _, r in vif_df.iterrows()
+                    )
+                    if not vif_df.empty else "N/A"
+                )
+                summary_rows.append({
+                    "Component": vpc,
+                    "N_Materials": len(selected),
+                    "Materials": ", ".join(selected),
+                    "R_squared": round(r2, 4),
+                    "Adj_R_squared": round(adj, 4),
+                    "Max_VIF": (
+                        round(float(vif_df["VIF"].max()), 2)
+                        if not vif_df.empty else np.nan
+                    ),
+                    "VIF_Details": vif_details,
+                })
+
+                # SPSS-style tables
+                self.regression_tables_[vpc] = build_regression_tables(
+                    vpc_name=vpc,
+                    y=self.z_loadings_[vpc],
+                    X=self.z_library_,
+                    selected=selected,
+                    history=sel.iteration_history_,
+                )
+            else:
+                summary_rows.append({
+                    "Component": vpc,
+                    "N_Materials": 0,
+                    "Materials": "None",
+                    "R_squared": 0.0,
+                    "Adj_R_squared": 0.0,
+                    "Max_VIF": np.nan,
+                    "VIF_Details": "N/A",
+                })
+
+        self.summary_results_ = pd.DataFrame(summary_rows)
+        self.detailed_results_ = pd.DataFrame(detailed_rows)
+        return self.summary_results_, self.detailed_results_
+
+    def get_iteration_history_all(self) -> pd.DataFrame:
+        """Combined iteration history across all components."""
+        rows = []
+        for vpc, m in self.models_.items():
+            h = m.get_iteration_history()
+            if not h.empty:
+                h = h.copy()
+                h.insert(0, "Component", vpc)
+                rows.append(h)
+        return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
+
+    # --- export ---
+    def export_results(self, output_dir: str,
+                       base_filename: str = "stepwise_results") -> Dict[str, str]:
+        """Write a complete Excel report.
+
+        Sheets:
+            - Summary, VIF_Details, IterationHistory, Descriptive_Stats, Settings
+            - Per-VPC sheet with Model_Summary / ANOVA / Coefficients (SPSS-style)
+        """
+        os.makedirs(output_dir, exist_ok=True)
+        out: Dict[str, str] = {}
+
+        # CSV summary (quick-look)
+        csv_path = os.path.join(output_dir, f"{base_filename}_summary.csv")
+        if self.summary_results_ is not None:
+            self.summary_results_.to_csv(csv_path, index=False)
+            out["csv_summary"] = csv_path
+
+        excel_path = os.path.join(output_dir, f"{base_filename}_detailed.xlsx")
+        with pd.ExcelWriter(excel_path, engine="openpyxl") as writer:
+            if self.summary_results_ is not None:
+                self.summary_results_.to_excel(
+                    writer, sheet_name="Summary", index=False
+                )
+
+            if self.detailed_results_ is not None and not self.detailed_results_.empty:
+                cols = ["Component", "Material", "VIF", "R_squared",
+                        "Adj_R_squared", "Sig_p", "Std_Beta"]
+                self.detailed_results_[cols].to_excel(
+                    writer, sheet_name="VIF_Details", index=False
+                )
+
+            hist_all = self.get_iteration_history_all()
+            if not hist_all.empty:
+                hist_all.to_excel(writer, sheet_name="IterationHistory", index=False)
+
+            if self.descriptive_stats_ is not None:
+                self.descriptive_stats_.to_excel(
+                    writer, sheet_name="Descriptive_Stats", index=False
+                )
+
+            # Per-VPC SPSS-style tables on individual sheets
+            for vpc, (ms_df, anova_df, coef_df) in self.regression_tables_.items():
+                sheet = vpc[:31]  # Excel sheet names <= 31 chars
+                row = 0
+                ms_df.to_excel(writer, sheet_name=sheet, startrow=row, index=False)
+                row += len(ms_df) + 3
+                anova_df.to_excel(writer, sheet_name=sheet, startrow=row, index=False)
+                row += len(anova_df) + 3
+                coef_df.to_excel(writer, sheet_name=sheet, startrow=row, index=False)
+
+            settings_df = pd.DataFrame({
+                "Parameter": ["p_enter", "p_remove", "vif_threshold", "max_iter", "method"],
+                "Value": [self.p_enter, self.p_remove, self.vif_threshold,
+                          self.max_iter, "bidirectional"],
+                "Description": [
+                    "p-value threshold to ADD variable",
+                    "p-value threshold to REMOVE variable",
+                    "Maximum VIF allowed",
+                    "Max bidirectional iterations",
+                    "Selection method",
+                ],
+            })
+            settings_df.to_excel(writer, sheet_name="Settings", index=False)
+
+        out["excel"] = excel_path
+        if self.verbose > 0:
+            print(f"\nWrote: {csv_path}")
+            print(f"Wrote: {excel_path}")
+        return out
+
+    # --- accessors / plotting helpers ---
+    def get_model(self, component: str) -> StepwiseVIFRegression:
+        return self.models_[component]
 
 
-def create_identification_summary(results: Dict[str, StepwiseResult]) -> pd.DataFrame:
-    """
-    Create summary table of material identifications for all components.
-    
-    Parameters
-    ----------
-    results : Dict[str, StepwiseResult]
-        Results from run_stepwise_identification
-    
+def run_vpca_stepwise(
+    z_loadings: pd.DataFrame,
+    z_library: pd.DataFrame,
+    p_enter: float = 0.05,
+    p_remove: float = 0.10,
+    vif_threshold: float = 2.0,
+    max_iter: int = 100,
+    verbose: int = 1,
+) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, StepwiseVIFRegression]]:
+    """Functional shortcut: run bidirectional stepwise per VPC.
+
     Returns
     -------
-    pd.DataFrame
-        Summary with columns: Component, Materials, N_Materials, R2, Adj_R2, Max_VIF
+    (summary_df, detailed_df, models_dict)
     """
-    summary_rows = []
-    
-    for comp, result in results.items():
-        max_vif = result.vif_values['VIF'].max() if not result.vif_values.empty else 0.0
-        
-        summary_rows.append({
-            'Component': comp,
-            'Materials': ', '.join(result.selected_materials),
-            'N_Materials': len(result.selected_materials),
-            'R2': result.r2,
-            'Adj_R2': result.adj_r2,
-            'Max_VIF': max_vif
-        })
-    
-    return pd.DataFrame(summary_rows)
+    summary_rows, detailed_rows, models = [], [], {}
 
+    for vpc in z_loadings.columns:
+        if verbose > 0:
+            print(f"\n=== {vpc} ===")
+        sel = StepwiseVIFRegression(
+            p_enter=p_enter, p_remove=p_remove,
+            vif_threshold=vif_threshold, max_iter=max_iter, verbose=verbose,
+        ).fit(z_library, z_loadings[vpc])
+        models[vpc] = sel
+        chosen = sel.selected_features_
 
-def print_identification_report(results: Dict[str, StepwiseResult]):
-    """Print formatted identification report."""
-    print("\n" + "=" * 70)
-    print("MATERIAL IDENTIFICATION REPORT")
-    print("=" * 70)
-    
-    for comp, result in results.items():
-        print(f"\n{comp}:")
-        print(f"  R² = {result.r2:.4f}, Adj R² = {result.adj_r2:.4f}")
-        print(f"  Materials identified ({len(result.selected_materials)}):")
-        for mat in result.selected_materials:
-            coef_row = result.coefficients[result.coefficients['material'] == mat]
-            if not coef_row.empty:
-                coef = coef_row['coefficient'].values[0]
-                pval = coef_row['p_value'].values[0]
-                print(f"    - {mat}: coef={coef:.4f}, p={pval:.4f}")
-        
-        if not result.vif_values.empty:
-            max_vif = result.vif_values['VIF'].max()
-            print(f"  Max VIF: {max_vif:.2f}")
-    
-    print("\n" + "=" * 70)
+        if chosen:
+            m = sel.model_
+            r2 = float(m.rsquared)
+            adj = float(m.rsquared_adj)
+            vif_df = sel.get_vif()
+            ep = sel.get_entry_pvalues()
+            std_b = sel.get_standardized_coefs()
+            for v in chosen:
+                vif_val = (
+                    float(vif_df.loc[vif_df["Variable"] == v, "VIF"].values[0])
+                    if not vif_df.empty else np.nan
+                )
+                detailed_rows.append({
+                    "Component": vpc,
+                    "Material": v,
+                    "VIF": round(vif_val, 2),
+                    "R_squared": round(r2, 4),
+                    "Adj_R_squared": round(adj, 4),
+                    "Sig_p": round(float(ep.get(v, np.nan)), 4) if v in ep.index else np.nan,
+                    "Std_Beta": round(float(std_b.get(v, np.nan)), 4) if v in std_b.index else np.nan,
+                })
+            summary_rows.append({
+                "Component": vpc,
+                "N_Materials": len(chosen),
+                "Materials": ", ".join(chosen),
+                "R_squared": round(r2, 4),
+                "Adj_R_squared": round(adj, 4),
+                "Max_VIF": round(float(vif_df["VIF"].max()), 2) if not vif_df.empty else np.nan,
+                "VIF_Details": (
+                    ", ".join(
+                        f"{r['Variable']}({r['VIF']:.2f})"
+                        for _, r in vif_df.iterrows()
+                    ) if not vif_df.empty else "N/A"
+                ),
+            })
+        else:
+            summary_rows.append({
+                "Component": vpc, "N_Materials": 0, "Materials": "None",
+                "R_squared": 0.0, "Adj_R_squared": 0.0,
+                "Max_VIF": np.nan, "VIF_Details": "N/A",
+            })
+
+    return pd.DataFrame(summary_rows), pd.DataFrame(detailed_rows), models

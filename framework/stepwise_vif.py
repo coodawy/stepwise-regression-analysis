@@ -1,469 +1,350 @@
 """
-Stepwise Regression with Joint VIF and P-Value Stopping Criterion
+StepwiseVIFRegression: bidirectional stepwise regression with joint p-value
+and VIF stopping criteria.
 
-Author: Abdulrahman Hussein
-Supervisor: Dr. Joseph D. Ortiz
+Author:      Abdulrahman Hussein
+Supervisor:  Dr. Joseph D. Ortiz
 Institution: Kent State University, Department of Earth Sciences
-
-This module implements stepwise regression with a joint stopping criterion
-based on both statistical significance (p-values) and multicollinearity (VIF).
 """
+
+from __future__ import annotations
+
+import warnings
+from dataclasses import dataclass
+from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
 import statsmodels.api as sm
-from typing import List, Tuple, Optional, Dict
-from dataclasses import dataclass
 
-from .vif_utils import check_vif_threshold, get_highest_vif_variable
-from .plots import plot_selection_history, plot_vif, plot_coefficients
+from .vif_utils import calculate_vif, fit_ols
 
 
 @dataclass
 class IterationLog:
-    """Data class to store information about each iteration of stepwise selection."""
+    """One row of the stepwise iteration history."""
     step: int
-    action: str
+    action: str            # "ADD", "REMOVE_P", "REMOVE_VIF"
     variable: str
-    p_value: float
-    vif: float
+    p_value: Optional[float]
+    vif: Optional[float]
     r2: float
-    adj_r2: float
-    aic: float
-    bic: float
-    r2_change: float  # Track R² change from previous step
-    max_vif: float    # Track maximum VIF in model at this step
-    variables_in_model: List[str]
-    
+    n_variables: int
+    variables: str         # comma-joined list
+
     def to_dict(self) -> Dict:
         return {
-            'step': self.step, 'action': self.action, 'variable': self.variable,
-            'p_value': self.p_value, 'vif': self.vif, 'r2': self.r2,
-            'adj_r2': self.adj_r2, 'aic': self.aic, 'bic': self.bic,
-            'r2_change': self.r2_change, 'max_vif': self.max_vif,
-            'n_variables': len(self.variables_in_model),
-            'variables': ', '.join(self.variables_in_model)
+            "step": self.step,
+            "action": self.action,
+            "variable": self.variable,
+            "p_value": self.p_value,
+            "vif": self.vif,
+            "r2": self.r2,
+            "n_variables": self.n_variables,
+            "variables": self.variables,
         }
 
 
-def fit_ols_model(X: pd.DataFrame, y: pd.Series, add_const: bool = True):
-    """Fit an OLS model and return the results."""
-    X_fit = sm.add_constant(X, has_constant='add') if add_const else X
-    return sm.OLS(y, X_fit).fit()
-
-
-def get_model_metrics(model) -> Dict:
-    """Extract key metrics from a fitted OLS model."""
-    return {
-        'r2': model.rsquared, 'adj_r2': model.rsquared_adj,
-        'aic': model.aic, 'bic': model.bic,
-        'f_statistic': model.fvalue, 'f_pvalue': model.f_pvalue,
-        'n_obs': int(model.nobs), 'df_model': int(model.df_model),
-        'df_resid': int(model.df_resid)
-    }
-
-
 class StepwiseVIFRegression:
-    """
-    Stepwise Regression with Joint VIF and P-Value Stopping Criterion.
-    
-    Based on methodology from Dr. Joseph D. Ortiz, Kent State University.
-    Uses dual stopping criteria: p-value significance AND variance inflation factor.
-    
+    """Bidirectional stepwise regression with joint p-value and VIF stopping criteria.
+
     Parameters
     ----------
-    method : str, default='bidirectional'
-        Selection method: 'forward', 'backward', or 'bidirectional'
-    p_enter : float, default=0.05
-        P-value threshold for adding a variable (5% significance level)
-    p_remove : float, default=0.10
-        P-value threshold for removing a variable (10% level)
-    vif_threshold : float, default=2.0
-        Maximum acceptable VIF value. Default is 2.0 (recommended for principal
-        components which are already partitioned). Traditional threshold is 5.0.
-    r2_change_threshold : float, default=None
-        Optional minimum R² change to continue adding variables. If a variable
-        adds less than this threshold to R², selection stops. Set to None to disable.
-    criteria : str, default='pvalue'
-        Selection criteria: 'pvalue', 'aic', 'bic', or 'adjr2'
-    max_iter : int, default=100
-        Maximum number of iterations
-    verbose : int, default=1
-        Verbosity level: 0=silent, 1=progress, 2=detailed
-    tolerance : float, default=0.001
-        Convergence tolerance for numerical stability
-    
-    Notes
-    -----
-    The joint stopping criterion ensures:
-    1. All coefficients have p-value < p_enter (statistically significant)
-    2. All VIF values < vif_threshold (no multicollinearity)
-    3. Optionally, R² change > r2_change_threshold (meaningful contribution)
-    
-    A VIF of 2 means the variance is doubled due to collinearity. For principal
-    components that have been orthogonalized, a lower threshold is appropriate.
+    p_enter : float, default 0.05
+        Maximum p-value for ADDING a variable.
+    p_remove : float, default 0.10
+        Minimum p-value to REMOVE an already-selected variable.
+    vif_threshold : float, default 2.0
+        Maximum acceptable VIF for any selected variable.
+    max_iter : int, default 100
+        Hard cap on number of bidirectional iterations.
+    verbose : int, default 1
+        0 = silent, 1 = step-by-step, 2 = detailed.
     """
-    
-    def __init__(self, method: str = 'bidirectional', p_enter: float = 0.05,
-                 p_remove: float = 0.10, vif_threshold: float = 2.0,
-                 r2_change_threshold: Optional[float] = None,
-                 criteria: str = 'pvalue', max_iter: int = 100, verbose: int = 1,
-                 tolerance: float = 0.001):
-        self.method = method.lower()
+
+    def __init__(self, p_enter: float = 0.05, p_remove: float = 0.10,
+                 vif_threshold: float = 2.0, max_iter: int = 100, verbose: int = 1):
+        if not (0 < p_enter < 1):
+            raise ValueError("p_enter must be in (0, 1)")
+        if not (0 < p_remove < 1):
+            raise ValueError("p_remove must be in (0, 1)")
+        if p_remove < p_enter:
+            warnings.warn(
+                "p_remove < p_enter is unusual: variables may be removed immediately after entering."
+            )
+        if vif_threshold <= 1:
+            raise ValueError("vif_threshold must be > 1")
+
         self.p_enter = p_enter
         self.p_remove = p_remove
         self.vif_threshold = vif_threshold
-        self.r2_change_threshold = r2_change_threshold
-        self.criteria = criteria.lower()
         self.max_iter = max_iter
         self.verbose = verbose
-        self.tolerance = tolerance
-        
+
         self.selected_features_: List[str] = []
         self.model_ = None
         self.iteration_history_: List[IterationLog] = []
         self.vif_final_: Optional[pd.DataFrame] = None
         self.feature_names_: List[str] = []
+        self.entry_pvalues_: Dict[str, float] = {}
+        self.standardized_coefs_: Dict[str, float] = {}
         self._is_fitted = False
-        self._prev_r2 = 0.0  # Track previous R² for change calculation
-    
-    def _print(self, message: str, level: int = 1):
+
+    # --- internal helpers ---
+    def _print(self, msg, level=1):
         if self.verbose >= level:
-            print(message)
-    
-    def _validate_inputs(self, X: pd.DataFrame, y: pd.Series):
+            print(msg)
+
+    def _validate(self, X: pd.DataFrame, y: pd.Series):
         if not isinstance(X, pd.DataFrame):
             raise ValueError("X must be a pandas DataFrame")
         if len(X) != len(y):
-            raise ValueError("X and y must have the same number of samples")
-        if X.isnull().any().any() or pd.Series(y).isnull().any():
-            raise ValueError("Data contains missing values")
-    
-    def _get_candidate_pvalues(self, X: pd.DataFrame, y: pd.Series,
-                               current: List[str], candidates: List[str]) -> pd.DataFrame:
-        results = []
-        for var in candidates:
-            try:
-                model = fit_ols_model(X[current + [var]], y)
-                metrics = get_model_metrics(model)
-                results.append({'feature': var, 'pvalue': model.pvalues[var],
-                               'aic': metrics['aic'], 'bic': metrics['bic'],
-                               'adj_r2': metrics['adj_r2']})
-            except Exception:
-                continue
-        return pd.DataFrame(results)
-    
-    def _remove_high_vif(self, X: pd.DataFrame, y: pd.Series,
-                         features: List[str], step: int) -> Tuple[List[str], int]:
-        while len(features) > 1:
-            vif_ok, _ = check_vif_threshold(X[features], self.vif_threshold)
-            if vif_ok:
-                break
-            var, max_vif = get_highest_vif_variable(X[features])
-            self._print(f"  VIF Removal: {var} (VIF={max_vif:.2f})", 1)
-            features.remove(var)
-            step += 1
-            
-            if features:
-                model = fit_ols_model(X[features], y)
-                metrics = get_model_metrics(model)
-            else:
-                metrics = {'r2': 0, 'adj_r2': 0, 'aic': np.inf, 'bic': np.inf}
-            
-            r2_change = metrics['r2'] - self._prev_r2
-            self._prev_r2 = metrics['r2']
-            _, vif_check = check_vif_threshold(X[features], self.vif_threshold) if features else (True, pd.DataFrame())
-            current_max_vif = vif_check['VIF'].max() if not vif_check.empty else 0.0
-            
-            self.iteration_history_.append(IterationLog(
-                step=step, action='vif_remove', variable=var, p_value=np.nan,
-                vif=max_vif, r2=metrics['r2'], adj_r2=metrics['adj_r2'],
-                aic=metrics['aic'], bic=metrics['bic'], r2_change=r2_change,
-                max_vif=current_max_vif, variables_in_model=features.copy()
-            ))
-        return features, step
-    
-    def _forward_step(self, X: pd.DataFrame, y: pd.Series, current: List[str],
-                      remaining: List[str], step: int) -> Tuple[List[str], List[str], int, bool]:
-        if not remaining:
-            return current, remaining, step, False
-        
-        df = self._get_candidate_pvalues(X, y, current, remaining)
-        if df.empty:
-            return current, remaining, step, False
-        
-        # Select best based on criteria
-        if self.criteria == 'pvalue':
-            df = df.sort_values('pvalue')
-            best = df.iloc[0]
-            if best['pvalue'] >= self.p_enter:
-                return current, remaining, step, False
-        elif self.criteria == 'aic':
-            best = df.sort_values('aic').iloc[0]
-        elif self.criteria == 'bic':
-            best = df.sort_values('bic').iloc[0]
-        else:  # adjr2
-            best = df.sort_values('adj_r2', ascending=False).iloc[0]
-        
-        # Check VIF before adding - with look-ahead recovery
-        test = current + [best['feature']]
-        if len(test) > 1:
-            vif_ok, _ = check_vif_threshold(X[test], self.vif_threshold)
-            if not vif_ok:
-                # Look-ahead: try other candidates that pass VIF threshold
-                self._print(f"  VIF too high with {best['feature']}, trying alternatives...", 2)
-                found_alternative = False
-                for _, row in df.iterrows():
-                    if row['feature'] == best['feature']:
-                        continue
-                    if self.criteria == 'pvalue' and row['pvalue'] >= self.p_enter:
-                        continue
-                    alt_test = current + [row['feature']]
-                    alt_vif_ok, _ = check_vif_threshold(X[alt_test], self.vif_threshold)
-                    if alt_vif_ok:
-                        best = row
-                        found_alternative = True
-                        self._print(f"  Found alternative: {best['feature']}", 2)
-                        break
-                
-                if not found_alternative:
-                    remaining.remove(best['feature'])
-                    return current, remaining, step, False
-        
-        var = best['feature']
-        current.append(var)
-        remaining.remove(var)
-        step += 1
-        self._print(f"  + Added: {var} (p={best['pvalue']:.4f})", 1)
-        
-        model = fit_ols_model(X[current], y)
-        metrics = get_model_metrics(model)
-        _, vif_df = check_vif_threshold(X[current], self.vif_threshold)
-        vif_val = vif_df[vif_df['feature'] == var]['VIF'].values[0] if not vif_df.empty else np.nan
-        
-        r2_change = metrics['r2'] - self._prev_r2
-        self._prev_r2 = metrics['r2']
-        max_vif_current = vif_df['VIF'].max() if not vif_df.empty else 1.0
-        
-        self._print(f"    R²={metrics['r2']:.4f}, ΔR²={r2_change:.4f}, max_VIF={max_vif_current:.2f}", 2)
-        
-        # Check R² change threshold if specified
-        if self.r2_change_threshold is not None and r2_change < self.r2_change_threshold and len(current) > 1:
-            self._print(f"  R² change ({r2_change:.4f}) below threshold ({self.r2_change_threshold}). Reverting.", 1)
-            current.remove(var)
-            remaining.append(var)
-            self._prev_r2 = metrics['r2'] - r2_change  # Restore previous R²
-            return current, remaining, step - 1, False
-        
-        self.iteration_history_.append(IterationLog(
-            step=step, action='add', variable=var, p_value=best['pvalue'],
-            vif=vif_val, r2=metrics['r2'], adj_r2=metrics['adj_r2'],
-            aic=metrics['aic'], bic=metrics['bic'], r2_change=r2_change,
-            max_vif=max_vif_current, variables_in_model=current.copy()
-        ))
-        return current, remaining, step, True
-    
-    def _backward_step(self, X: pd.DataFrame, y: pd.Series,
-                       current: List[str], step: int) -> Tuple[List[str], int, bool]:
-        if len(current) <= 1:
-            return current, step, False
-        
-        model = fit_ols_model(X[current], y)
-        pvals = model.pvalues.drop('const', errors='ignore')
-        max_var, max_p = pvals.idxmax(), pvals.max()
-        
-        if max_p <= self.p_remove:
-            return current, step, False
-        
-        current.remove(max_var)
-        step += 1
-        self._print(f"  - Removed: {max_var} (p={max_p:.4f})", 1)
-        
+            raise ValueError("X and y must have the same number of rows")
+        if X.isnull().any().any():
+            raise ValueError("X contains NaN values")
+        if pd.Series(y).isnull().any():
+            raise ValueError("y contains NaN values")
+        if X.shape[1] > X.shape[0]:
+            warnings.warn(
+                f"n_features ({X.shape[1]}) > n_samples ({X.shape[0]}). "
+                "Stepwise regression with high-dim data is well-defined but be cautious about overfitting."
+            )
+
+    def _log(self, step, action, var, p, vif, current):
         if current:
-            model = fit_ols_model(X[current], y)
-            metrics = get_model_metrics(model)
+            r2 = float(fit_ols(self.X_[current], self.y_).rsquared)
         else:
-            metrics = {'r2': 0, 'adj_r2': 0, 'aic': np.inf, 'bic': np.inf}
-        
-        r2_change = metrics['r2'] - self._prev_r2
-        self._prev_r2 = metrics['r2']
-        _, vif_check = check_vif_threshold(X[current], self.vif_threshold) if current else (True, pd.DataFrame())
-        max_vif_current = vif_check['VIF'].max() if not vif_check.empty else 0.0
-        
+            r2 = 0.0
         self.iteration_history_.append(IterationLog(
-            step=step, action='remove', variable=max_var, p_value=max_p,
-            vif=np.nan, r2=metrics['r2'], adj_r2=metrics['adj_r2'],
-            aic=metrics['aic'], bic=metrics['bic'], r2_change=r2_change,
-            max_vif=max_vif_current, variables_in_model=current.copy()
+            step=step, action=action, variable=var,
+            p_value=(round(float(p), 4) if p is not None else None),
+            vif=(round(float(vif), 3) if vif is not None else None),
+            r2=round(r2, 4),
+            n_variables=len(current),
+            variables=", ".join(current),
         ))
-        return current, step, True
-    
-    def fit(self, X: pd.DataFrame, y: pd.Series) -> 'StepwiseVIFRegression':
-        """Fit the stepwise regression model."""
-        self._validate_inputs(X, y)
-        self.feature_names_ = X.columns.tolist()
+
+    # --- public API ---
+    def fit(self, X: pd.DataFrame, y: pd.Series) -> "StepwiseVIFRegression":
+        self._validate(X, y)
+        self.X_ = X
+        self.y_ = y
+        self.feature_names_ = list(X.columns)
+
+        selected: List[str] = []
+        remaining: List[str] = list(X.columns)
         self.iteration_history_ = []
-        self._prev_r2 = 0.0  # Reset R² tracking for new fit
-        
-        if self.method == 'forward':
-            self._fit_forward(X, y)
-        elif self.method == 'backward':
-            self._fit_backward(X, y)
+        self.entry_pvalues_ = {}
+        self.standardized_coefs_ = {}
+        step = 0
+
+        self._print(
+            f"Bidirectional Stepwise | p_enter<{self.p_enter} | "
+            f"p_remove>{self.p_remove} | VIF<{self.vif_threshold}"
+        )
+
+        for _ in range(self.max_iter):
+            changed = False
+
+            # ---- FORWARD: best p-value among remaining ----
+            best_p, best_var, best_r2 = 1.0, None, 0.0
+            for var in remaining:
+                try:
+                    m = fit_ols(X[selected + [var]], y)
+                    p = float(m.pvalues[var])
+                    if p < best_p:
+                        best_p, best_var, best_r2 = p, var, float(m.rsquared)
+                except Exception:
+                    continue
+
+            if best_var is not None and best_p < self.p_enter:
+                test = selected + [best_var]
+                vif_ok = True
+                max_vif = 1.0
+                if len(test) > 1:
+                    vifs = calculate_vif(X[test])["VIF"]
+                    max_vif = float(vifs.max())
+                    vif_ok = max_vif <= self.vif_threshold
+
+                if vif_ok:
+                    step += 1
+                    selected.append(best_var)
+                    remaining.remove(best_var)
+                    self.entry_pvalues_[best_var] = best_p
+                    changed = True
+                    self._log(step, "ADD", best_var, best_p, max_vif, selected)
+                    self._print(
+                        f"Step {step}: + ADD    {best_var:<35} | "
+                        f"p={best_p:.4f} | R2={best_r2:.4f} | VIF={max_vif:.2f}"
+                    )
+                else:
+                    # Permanently drop this candidate (matches v3 behaviour)
+                    remaining.remove(best_var)
+                    self._print(
+                        f"  SKIP   {best_var:<35} | p={best_p:.4f} but "
+                        f"VIF={max_vif:.2f} > {self.vif_threshold}",
+                        level=2,
+                    )
+
+            # ---- BACKWARD by p-value ----
+            if selected:
+                m = fit_ols(X[selected], y)
+                pvals = m.pvalues.drop("const", errors="ignore")
+                if len(pvals) > 0:
+                    worst_var = pvals.idxmax()
+                    worst_p = float(pvals.max())
+                    if worst_p > self.p_remove:
+                        step += 1
+                        selected.remove(worst_var)
+                        remaining.append(worst_var)
+                        self.entry_pvalues_.pop(worst_var, None)
+                        changed = True
+                        self._log(step, "REMOVE_P", worst_var, worst_p, None, selected)
+                        self._print(
+                            f"Step {step}: - REMOVE {worst_var:<35} | "
+                            f"p={worst_p:.4f} > {self.p_remove}"
+                        )
+
+            # ---- BACKWARD by VIF ----
+            if len(selected) > 1:
+                vif_df = calculate_vif(X[selected])
+                worst = vif_df.loc[vif_df["VIF"].idxmax()]
+                if float(worst["VIF"]) > self.vif_threshold:
+                    step += 1
+                    var = worst["Variable"]
+                    selected.remove(var)
+                    remaining.append(var)
+                    self.entry_pvalues_.pop(var, None)
+                    changed = True
+                    self._log(step, "REMOVE_VIF", var, None, float(worst["VIF"]), selected)
+                    self._print(
+                        f"Step {step}: - REMOVE {var:<35} | "
+                        f"VIF={float(worst['VIF']):.2f} > {self.vif_threshold}"
+                    )
+
+            if not changed:
+                self._print("Converged.")
+                break
+
+        self.selected_features_ = selected
+        if selected:
+            self.model_ = fit_ols(X[selected], y)
+            self.vif_final_ = (
+                calculate_vif(X[selected])
+                if len(selected) > 1
+                else pd.DataFrame([{"Variable": selected[0], "VIF": 1.0}])
+            )
+            self.standardized_coefs_ = {
+                v: float(self.model_.params[v])
+                for v in selected
+                if v in self.model_.params.index
+            }
         else:
-            self._fit_bidirectional(X, y)
-        
-        if self.selected_features_:
-            self.model_ = fit_ols_model(X[self.selected_features_], y)
-            _, self.vif_final_ = check_vif_threshold(X[self.selected_features_], self.vif_threshold)
-        
+            self.model_ = None
+            self.vif_final_ = pd.DataFrame()
         self._is_fitted = True
-        self._print(f"\nFinal features ({len(self.selected_features_)}): {self.selected_features_}", 1)
+
+        self._print(f"\nFinal: {len(selected)} variable(s) selected.")
+        if selected:
+            self._print(
+                f"  R2={self.model_.rsquared:.4f} | "
+                f"Adj R2={self.model_.rsquared_adj:.4f}"
+            )
         return self
-    
-    def _fit_forward(self, X: pd.DataFrame, y: pd.Series):
-        self._print(f"\n{'='*50}\nFORWARD SELECTION\np_enter={self.p_enter}, vif={self.vif_threshold}\n{'='*50}\n", 1)
-        current, remaining, step = [], self.feature_names_.copy(), 0
-        
-        for i in range(self.max_iter):
-            self._print(f"Iteration {i+1}:", 1)
-            current, remaining, step, added = self._forward_step(X, y, current, remaining, step)
-            if not added:
-                self._print("  No variable added. Stopping.", 1)
-                break
-            current, step = self._remove_high_vif(X, y, current, step)
-        
-        self.selected_features_ = current
-    
-    def _fit_backward(self, X: pd.DataFrame, y: pd.Series):
-        self._print(f"\n{'='*50}\nBACKWARD ELIMINATION\np_remove={self.p_remove}, vif={self.vif_threshold}\n{'='*50}\n", 1)
-        current, step = self.feature_names_.copy(), 0
-        
-        self._print("Step 1: Removing high VIF variables...", 1)
-        current, step = self._remove_high_vif(X, y, current, step)
-        
-        self._print("\nStep 2: Backward elimination...", 1)
-        for i in range(self.max_iter):
-            self._print(f"Iteration {i+1}:", 1)
-            current, step, removed = self._backward_step(X, y, current, step)
-            if not removed:
-                self._print("  No variable removed. Stopping.", 1)
-                break
-            current, step = self._remove_high_vif(X, y, current, step)
-        
-        self.selected_features_ = current
-    
-    def _fit_bidirectional(self, X: pd.DataFrame, y: pd.Series):
-        self._print(f"\n{'='*50}\nBIDIRECTIONAL STEPWISE\np_enter={self.p_enter}, p_remove={self.p_remove}, vif={self.vif_threshold}\n{'='*50}\n", 1)
-        current, remaining, step, no_change = [], self.feature_names_.copy(), 0, 0
-        
-        for i in range(self.max_iter):
-            self._print(f"Iteration {i+1}:", 1)
-            before = current.copy()
-            
-            current, remaining, step, added = self._forward_step(X, y, current, remaining, step)
-            if added:
-                current, step = self._remove_high_vif(X, y, current, step)
-            
-            if len(current) > 1:
-                current, step, removed = self._backward_step(X, y, current, step)
-                if removed:
-                    removed_var = [v for v in before if v not in current and v not in remaining]
-                    remaining.extend(removed_var)
-            
-            if set(current) == set(before):
-                no_change += 1
-                if no_change >= 2:
-                    self._print("  Converged.", 1)
-                    break
-            else:
-                no_change = 0
-        
-        self.selected_features_ = current
-    
+
+    # --- prediction & scoring ---
     def predict(self, X: pd.DataFrame) -> np.ndarray:
-        """Predict using the fitted model."""
-        if not self._is_fitted or self.model_ is None:
-            raise ValueError("Model not fitted or no features selected.")
-        X_sel = sm.add_constant(X[self.selected_features_], has_constant='add')
-        return self.model_.predict(X_sel)
-    
+        self._check_fitted()
+        if self.model_ is None:
+            raise ValueError("No features were selected; cannot predict.")
+        Xs = sm.add_constant(X[self.selected_features_], has_constant="add")
+        return self.model_.predict(Xs)
+
+    def score(self, X: pd.DataFrame, y: pd.Series) -> float:
+        """R^2 on (X, y)."""
+        self._check_fitted()
+        if self.model_ is None:
+            return 0.0
+        y_pred = self.predict(X)
+        ss_res = float(np.sum((y - y_pred) ** 2))
+        ss_tot = float(np.sum((y - np.mean(y)) ** 2))
+        return 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
+
+    # --- accessors ---
     def get_iteration_history(self) -> pd.DataFrame:
-        """Get iteration history as DataFrame."""
-        if not self.iteration_history_:
-            return pd.DataFrame()
         return pd.DataFrame([log.to_dict() for log in self.iteration_history_])
-    
+
     def get_vif(self) -> pd.DataFrame:
-        """Get VIF values for selected features."""
-        return self.vif_final_
-    
+        self._check_fitted()
+        return self.vif_final_.copy() if self.vif_final_ is not None else pd.DataFrame()
+
+    def get_entry_pvalues(self) -> pd.Series:
+        self._check_fitted()
+        return pd.Series(self.entry_pvalues_)
+
+    def get_standardized_coefs(self) -> pd.Series:
+        self._check_fitted()
+        return pd.Series(self.standardized_coefs_)
+
+    def _check_fitted(self):
+        if not self._is_fitted:
+            raise ValueError("Model has not been fitted. Call .fit() first.")
+
+    # --- text summary ---
     def summary(self) -> str:
-        """Return model summary string."""
-        if not self._is_fitted or self.model_ is None:
-            return "Model not fitted or no features selected."
-        
-        m = get_model_metrics(self.model_)
-        r2_thresh_str = f"R² change threshold: {self.r2_change_threshold}" if self.r2_change_threshold else "R² change threshold: None (disabled)"
-        
-        lines = [
-            "=" * 70, "STEPWISE REGRESSION WITH VIF - MODEL SUMMARY", "=" * 70, "",
-            f"Method: {self.method.upper()}", f"P-enter: {self.p_enter}  P-remove: {self.p_remove}",
-            f"VIF threshold: {self.vif_threshold}", r2_thresh_str, "",
-            f"Selected Features ({len(self.selected_features_)}):",
-            *[f"  - {f}" for f in self.selected_features_], "",
-            "-" * 70, "MODEL STATISTICS", "-" * 70,
-            f"R-squared:          {m['r2']:.6f}", f"Adjusted R-squared: {m['adj_r2']:.6f}",
-            f"AIC:                {m['aic']:.2f}", f"BIC:                {m['bic']:.2f}",
-            f"F-statistic:        {m['f_statistic']:.4f}", f"F p-value:          {m['f_pvalue']:.2e}",
-            f"Observations:       {m['n_obs']}", "",
-            "-" * 70, "COEFFICIENTS", "-" * 70,
-            f"{'Variable':<20} {'Coef':>12} {'Std Err':>12} {'t':>10} {'P>|t|':>12} {'VIF':>10}",
-            "-" * 70
-        ]
-        
-        for var in ['const'] + self.selected_features_:
-            if var in self.model_.params.index:
-                coef = self.model_.params[var]
-                se = self.model_.bse[var]
-                t = self.model_.tvalues[var]
-                p = self.model_.pvalues[var]
-                vif = "N/A" if var == 'const' else f"{self.vif_final_[self.vif_final_['feature']==var]['VIF'].values[0]:.2f}"
-                lines.append(f"{var:<20} {coef:>12.4f} {se:>12.4f} {t:>10.3f} {p:>12.4f} {vif:>10}")
-        
-        lines.append("=" * 70)
-        return "\n".join(lines)
-    
-    def selection_summary(self) -> str:
-        """Return detailed selection history summary showing R² changes at each step."""
-        if not self.iteration_history_:
-            return "No selection history available."
-        
-        lines = [
-            "=" * 80,
-            "STEPWISE SELECTION HISTORY",
-            "=" * 80,
-            f"{'Step':<6} {'Action':<12} {'Variable':<20} {'R²':>8} {'ΔR²':>8} {'Max VIF':>8} {'P-value':>10}",
-            "-" * 80
-        ]
-        
-        for log in self.iteration_history_:
-            r2_str = f"{log.r2:.4f}" if not np.isnan(log.r2) else "N/A"
-            r2_chg = f"{log.r2_change:+.4f}" if not np.isnan(log.r2_change) else "N/A"
-            max_vif = f"{log.max_vif:.2f}" if not np.isnan(log.max_vif) else "N/A"
-            pval = f"{log.p_value:.4f}" if not np.isnan(log.p_value) else "N/A"
-            lines.append(f"{log.step:<6} {log.action:<12} {log.variable:<20} {r2_str:>8} {r2_chg:>8} {max_vif:>8} {pval:>10}")
-        
-        lines.append("=" * 80)
-        return "\n".join(lines)
-    
-    def plot_selection_history(self, figsize=(14, 10), save_path=None):
-        """Plot selection history."""
-        plot_selection_history(self.get_iteration_history(), figsize, save_path)
-    
-    def plot_vif(self, figsize=(10, 6), save_path=None):
-        """Plot VIF values."""
-        plot_vif(self.vif_final_, self.vif_threshold, figsize, save_path)
-    
-    def plot_coefficients(self, figsize=(10, 6), save_path=None):
-        """Plot coefficients."""
-        plot_coefficients(self.model_, figsize, save_path)
+        self._check_fitted()
+        if self.model_ is None:
+            return "No features were selected."
+        m = self.model_
+        out = []
+        out.append("=" * 78)
+        out.append("STEPWISE REGRESSION (BIDIRECTIONAL)  -  MODEL SUMMARY")
+        out.append("=" * 78)
+        out.append(
+            f"p_enter={self.p_enter}  p_remove={self.p_remove}  "
+            f"vif_threshold={self.vif_threshold}"
+        )
+        out.append("")
+        out.append(f"Selected features ({len(self.selected_features_)}):")
+        for f in self.selected_features_:
+            out.append(f"  - {f}")
+        out.append("")
+        out.append("-" * 78)
+        out.append(f"R-squared        : {m.rsquared:.6f}")
+        out.append(f"Adj R-squared    : {m.rsquared_adj:.6f}")
+        out.append(f"AIC              : {m.aic:.2f}")
+        out.append(f"BIC              : {m.bic:.2f}")
+        out.append(f"F-statistic      : {m.fvalue:.4f}")
+        out.append(f"F p-value        : {m.f_pvalue:.4e}")
+        out.append(f"Observations     : {int(m.nobs)}")
+        out.append("-" * 78)
+        out.append(
+            f"{'Variable':<28} {'Coef':>10} {'StdErr':>10} {'t':>8} "
+            f"{'P>|t|':>10} {'VIF':>8} {'EntryP':>10}"
+        )
+        out.append("-" * 78)
+        for v in ["const"] + self.selected_features_:
+            if v not in m.params.index:
+                continue
+            coef = float(m.params[v])
+            se = float(m.bse[v])
+            t = float(m.tvalues[v])
+            p = float(m.pvalues[v])
+            if v == "const":
+                vif_str, ep_str = "N/A", "N/A"
+            else:
+                vif_row = self.vif_final_[self.vif_final_["Variable"] == v]
+                vif_str = (
+                    f"{float(vif_row['VIF'].values[0]):.2f}"
+                    if not vif_row.empty else "N/A"
+                )
+                ep_str = (
+                    f"{self.entry_pvalues_.get(v, float('nan')):.4f}"
+                    if v in self.entry_pvalues_ else "N/A"
+                )
+            out.append(
+                f"{v:<28} {coef:>10.4f} {se:>10.4f} {t:>8.3f} "
+                f"{p:>10.4f} {vif_str:>8} {ep_str:>10}"
+            )
+        out.append("=" * 78)
+        return "\n".join(out)
